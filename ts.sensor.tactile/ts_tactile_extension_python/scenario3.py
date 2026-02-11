@@ -74,19 +74,22 @@ class ExampleScenario(ScenarioTemplate):
         rr.init("tashan_incremental_load_demo", spawn=True)
 
     def teardown_scenario(self):
-        self._set_up_sensor_and_scene()
         self._time = 0.0
-        self._articulation = None
         self._running_scenario = False
+        self.sensorFrameData = []
         self.sensorBuffer = []
         self.active_plate_count = 0
 
     def update_scenario(self, step: float, step_ind: int):
-        from register_sensor import TSsensor
-
-        self._activate_plates_by_step(step_ind)
-
-        self.sensorFrameData = TSsensor(self.tactile, self.range)
+        if not self._running_scenario:
+            return
+        try:
+            from register_sensor import TSsensor
+            self._activate_plates_by_step(step_ind)
+            self.sensorFrameData = TSsensor(self.tactile, self.range)
+        except Exception as e:
+            print(f"[TaShan] Sensor read error at step {step_ind}: {e}")
+            return
         self.sensorBuffer.append(
             [
                 float(self.sensorFrameData[1]),

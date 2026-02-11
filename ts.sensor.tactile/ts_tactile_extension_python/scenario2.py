@@ -68,19 +68,23 @@ class ExampleScenario(ScenarioTemplate):
         rr.init("tashan_standard_demo", spawn=True)
 
     def teardown_scenario(self):
-        self._set_up_sensor_and_scene()
         self._time = 0.0
-        self._articulation = None
         self._running_scenario = False
+        self.sensorFrameData = []
         self.sensorBuffer = []
 
     def update_scenario(self, step: float, step_ind: int):
-        from register_sensor import TSsensor
-        self.sensorFrameData = TSsensor(self.tactile, self.range)
+        if not self._running_scenario:
+            return
+        try:
+            from register_sensor import TSsensor
+            self.sensorFrameData = TSsensor(self.tactile, self.range)
+        except Exception as e:
+            print(f"[TaShan] Sensor read error at step {step_ind}: {e}")
+            return
         if step_ind <= 100:
             self.sensorBuffer.append(self.sensorFrameData)
         self._time += step
-        # print(("current time step: ", step_ind, self.sensorFrameData))
         self._update_rerun_visualization()
 
     def draw_data(self):
@@ -170,6 +174,6 @@ class ExampleScenario(ScenarioTemplate):
         self.tactile = RigidPrim(
             prim_paths_expr="/World/Tip/pad_[1-7]",
             name="finger_tactile",
-            contact_filter_prim_paths_expr=["/World/Cube1"],
-            max_contact_count= 7*5,
+            contact_filter_prim_paths_expr=[f"/World/Cube{i+1}" for i in range(4)],
+            max_contact_count=7 * 10,
         )
