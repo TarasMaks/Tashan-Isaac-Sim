@@ -16,15 +16,32 @@ Sensor data is streamed to Rerun for live monitoring. When the native
 TSsensor library is unavailable, the demo falls back to reading net
 contact forces from the PhysX tensor API rigid body views.
 
-Usage:
-    Register this module as a PhysX demo, or import and instantiate
-    FrankaDeformableSensorDemo directly within an Isaac Sim session.
+Deployment
+----------
+Place the entire ``ts.sensor.tactile`` folder inside one of Isaac Sim's
+extension search paths (see tree below), then launch with::
+
+    ./isaac-sim.sh --ext-folder /path/to/Tashan-Isaac-Sim --enable ts.sensor.tactile
+
+Usage
+-----
+Register this module as a PhysX demo, or import and instantiate
+``FrankaDeformableSensorDemo`` from the Script Editor after the extension
+is loaded.
 """
 
+# ---------------------------------------------------------------------------
+# IMPORTS — only lightweight / always-available modules at the top level.
+# Heavy or optional modules (rerun, matplotlib, register_sensor, RigidPrim,
+# omni.kit.app) are loaded lazily inside the functions that need them so
+# that importing this file never blocks Isaac Sim startup.
+# ---------------------------------------------------------------------------
 import carb
 import math
 import numpy as np
 import omni
+import os
+import sys
 from pxr import Gf, Sdf, UsdGeom, UsdShade, PhysxSchema, UsdPhysics
 import omni.physxdemos as demo
 from omni.physx.scripts import deformableUtils, utils, physicsUtils
@@ -32,51 +49,79 @@ from omni.physx.scripts.assets_paths import AssetFolders
 import omni.physx.bindings._physx as physx_settings_bindings
 from omni.physxdemos.utils import franka_helpers
 from omni.physxdemos.utils import numpy_utils
-import os
-import sys
-
-try:
-    import rerun as rr
-    RERUN_AVAILABLE = True
-except ImportError:
-    RERUN_AVAILABLE = False
-    print("[FrankaDeformableSensorDemo] rerun-sdk not installed, visualization disabled")
-
-try:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-
-# ---------------------------------------------------------------------------
-# Load Tashan native sensor library (best-effort)
-# ---------------------------------------------------------------------------
-_ts_sensor_loaded = False
-try:
-    import omni.kit.app as _APP
-    _current_dir = os.path.dirname(os.path.abspath(__file__))
-    _isaac_version = _APP.get_app().get_app_version()
-    _ts_lib_path = os.path.join(_current_dir, "ts_sensor_lib", "isaac-sim-" + _isaac_version)
-    if _ts_lib_path not in sys.path:
-        sys.path.insert(0, _ts_lib_path)
-    from register_sensor import TSsensor
-    _ts_sensor_loaded = True
-    print(f"[FrankaDeformableSensorDemo] TSsensor loaded (Isaac Sim {_isaac_version})")
-except Exception as _e:
-    print(f"[FrankaDeformableSensorDemo] TSsensor not available: {_e}")
-
-_RIGIDPRIM_AVAILABLE = False
-try:
-    from isaacsim.core.prims import RigidPrim
-    _RIGIDPRIM_AVAILABLE = True
-except ImportError:
-    pass
 
 deformable_beta_on = carb.settings.get_settings().get_as_bool(
     physx_settings_bindings.SETTING_ENABLE_DEFORMABLE_BETA
 )
+
+
+# ---------------------------------------------------------------------------
+# Lazy-loaded optional modules (populated on first use)
+# ---------------------------------------------------------------------------
+_rr = None           # rerun
+_plt = None          # matplotlib.pyplot
+_TSsensor = None     # register_sensor.TSsensor
+_RigidPrim = None    # isaacsim.core.prims.RigidPrim
+
+
+def _get_rerun():
+    """Return rerun module, importing on first call.  Returns None if unavailable."""
+    global _rr
+    if _rr is None:
+        try:
+            import rerun as rr
+            _rr = rr
+        except ImportError:
+            print("[FrankaDeformableSensorDemo] rerun-sdk not installed, "
+                  "visualization disabled.  Install with: pip install rerun-sdk==0.18.2")
+            _rr = False          # sentinel: tried and failed
+    return _rr if _rr is not False else None
+
+
+def _get_matplotlib():
+    """Return matplotlib.pyplot, importing on first call.  Returns None if unavailable."""
+    global _plt
+    if _plt is None:
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            _plt = plt
+        except ImportError:
+            _plt = False
+    return _plt if _plt is not False else None
+
+
+def _get_ts_sensor():
+    """Return the native TSsensor callable, loading the .so on first call."""
+    global _TSsensor
+    if _TSsensor is None:
+        try:
+            import omni.kit.app as APP
+            version = APP.get_app().get_app_version()
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            ts_lib_path = os.path.join(current_dir, "ts_sensor_lib", "isaac-sim-" + version)
+            if ts_lib_path not in sys.path:
+                sys.path.insert(0, ts_lib_path)
+            from register_sensor import TSsensor
+            _TSsensor = TSsensor
+            print(f"[FrankaDeformableSensorDemo] TSsensor loaded (Isaac Sim {version})")
+        except Exception as exc:
+            print(f"[FrankaDeformableSensorDemo] TSsensor not available: {exc}")
+            _TSsensor = False
+    return _TSsensor if _TSsensor is not False else None
+
+
+def _get_rigid_prim_class():
+    """Return isaacsim.core.prims.RigidPrim class, or None."""
+    global _RigidPrim
+    if _RigidPrim is None:
+        try:
+            from isaacsim.core.prims import RigidPrim
+            _RigidPrim = RigidPrim
+        except ImportError:
+            _RigidPrim = False
+    return _RigidPrim if _RigidPrim is not False else None
 
 
 # ---------------------------------------------------------------------------
@@ -123,12 +168,12 @@ class TashanFingerSensorManager:
         self.num_envs = num_envs
         self.sensor_usd_path = sensor_usd_path
 
-        # Per-finger sensor data: key = (env_idx, "left"|"right")
+        # Per-finger sensor data:  key = (env_idx, "left"|"right")
         self.sensor_data = {}
         self._tactile_prims = {}
         self._range_paths = {}
 
-        # Tensor API views (set later)
+        # Tensor API views (set in init_tensor_views)
         self.left_fingers = None
         self.right_fingers = None
 
@@ -194,11 +239,13 @@ class TashanFingerSensorManager:
     def init_rigid_prim_sensors(self):
         """Attempt to create RigidPrim objects for the native TSsensor callback.
 
-        This is best-effort: if the isaacsim.core.prims.RigidPrim import or
-        the prim-path expression fails (e.g. the TS-F-A USD structure does
-        not match expectations), the demo falls back to tensor-API forces.
+        This is best-effort: if ``isaacsim.core.prims.RigidPrim`` or the
+        native ``TSsensor`` library is unavailable, the demo falls back to
+        tensor-API contact forces.
         """
-        if not (_RIGIDPRIM_AVAILABLE and _ts_sensor_loaded):
+        RigidPrimCls = _get_rigid_prim_class()
+        ts_sensor_fn = _get_ts_sensor()
+        if RigidPrimCls is None or ts_sensor_fn is None:
             return
 
         for i in range(self.num_envs):
@@ -206,7 +253,7 @@ class TashanFingerSensorManager:
                 finger_name = f"panda_{side}finger"
                 sensor_base = f"/World/envs/env_{i}/franka/{finger_name}/ts_sensor"
                 try:
-                    tactile = RigidPrim(
+                    tactile = RigidPrimCls(
                         prim_paths_expr=f"{sensor_base}/pad_[1-7]",
                         name=f"tactile_{side}_{i}",
                         contact_filter_prim_paths_expr=[
@@ -229,7 +276,8 @@ class TashanFingerSensorManager:
 
     def init_rerun(self):
         """Spawn a Rerun viewer and open a recording stream."""
-        if not RERUN_AVAILABLE:
+        rr = _get_rerun()
+        if rr is None:
             return
         rr.init("franka_deformable_tactile", spawn=True)
         self._rerun_initialized = True
@@ -242,13 +290,13 @@ class TashanFingerSensorManager:
     def read_sensors(self):
         """Read sensor data from every finger, every environment."""
         self._step_count += 1
+        ts_sensor_fn = _get_ts_sensor()
 
         # Tensor API net contact forces (always available as fallback)
         try:
             left_forces = self.left_fingers.get_net_contact_forces()
             right_forces = self.right_fingers.get_net_contact_forces()
         except Exception:
-            # If contact forces are unavailable, use zero arrays
             left_forces = np.zeros((self.num_envs, 3), dtype=np.float32)
             right_forces = np.zeros((self.num_envs, 3), dtype=np.float32)
 
@@ -258,9 +306,9 @@ class TashanFingerSensorManager:
                 key = (i, side)
 
                 # --- Try native TSsensor first (full 11-channel) -----------
-                if key in self._tactile_prims and _ts_sensor_loaded:
+                if key in self._tactile_prims and ts_sensor_fn is not None:
                     try:
-                        raw = TSsensor(
+                        raw = ts_sensor_fn(
                             self._tactile_prims[key],
                             self._range_paths[key],
                         )
@@ -285,7 +333,6 @@ class TashanFingerSensorManager:
                 data[1] = force_normal
                 data[2] = force_tangential
                 data[3] = force_direction
-                # Distribute magnitude across 7 capacitance channels
                 for ch in range(7):
                     data[4 + ch] = force_mag / 7.0
 
@@ -305,6 +352,9 @@ class TashanFingerSensorManager:
     def update_rerun(self):
         """Log current sensor data to Rerun for every finger."""
         if not self._rerun_initialized:
+            return
+        rr = _get_rerun()
+        if rr is None:
             return
 
         for i in range(self.num_envs):
@@ -346,7 +396,8 @@ class TashanFingerSensorManager:
 
     def draw_data(self, env_idx=0):
         """Generate a matplotlib plot of buffered sensor data for *env_idx*."""
-        if not MATPLOTLIB_AVAILABLE:
+        plt = _get_matplotlib()
+        if plt is None:
             print("[TashanSensor] matplotlib not available, skipping plot")
             return
 
@@ -361,7 +412,7 @@ class TashanFingerSensorManager:
             arr = np.array(buf)
             steps = np.arange(len(arr))
             ax = axes[side_idx]
-            ax.set_title(f"Env {env_idx} – {side.capitalize()} Finger Sensor")
+            ax.set_title(f"Env {env_idx} - {side.capitalize()} Finger Sensor")
             ax.plot(steps, arr[:, 1], label="Normal Force (N)", linestyle="-")
             ax.plot(steps, arr[:, 2], label="Tangential Force (N)", linestyle="--")
             ax.plot(steps, arr[:, 0], label="Proximity", linestyle="-.")
@@ -372,7 +423,9 @@ class TashanFingerSensorManager:
         axes[-1].set_xlabel("Physics Step")
         fig.tight_layout()
 
-        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sensor_data")
+        out_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "sensor_data"
+        )
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, f"franka_finger_sensors_env{env_idx}.png")
         fig.savefig(out_path, dpi=150)
@@ -575,7 +628,7 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
     # Scene creation
     # ------------------------------------------------------------------
 
-    def create(self, stage, Num_Frankas, Num_Greens):  # noqa: N803 – matches base API
+    def create(self, stage, Num_Frankas, Num_Greens):  # noqa: N803
         self.defaultPrimPath = stage.GetDefaultPrim().GetPath()
         self.stage = stage
         self.num_envs = Num_Frankas
@@ -856,7 +909,6 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
 
         # ==================================================================
         # >>> TASHAN SENSOR ATTACHMENT <<<
-        # Attach TS-F-A sensors to every Franka finger after all envs are built
         # ==================================================================
         self._sensor_manager = TashanFingerSensorManager(
             num_envs=self.num_envs,
@@ -865,7 +917,7 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
         self._sensor_manager.attach_sensors_to_stage(stage, envsScopePath)
         print(
             f"[FrankaDeformableSensorDemo] Attached TS-F-A sensors to "
-            f"{self.num_envs * 2} fingers ({self.num_envs} envs × 2 fingers)"
+            f"{self.num_envs * 2} fingers ({self.num_envs} envs x 2 fingers)"
         )
 
         omni.usd.get_context().get_selection().set_selected_prim_paths([], False)
@@ -878,29 +930,24 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
         sim = tensorApi.create_simulation_view("numpy")
         sim.set_subspace_roots("/World/envs/*")
 
-        # Franka articulation view
         self.frankas = sim.create_articulation_view("/World/envs/*/franka")
         self.franka_indices = np.arange(self.frankas.count, dtype=np.int32)
 
-        # Set default DOF positions
         init_dof_pos = np.stack(
             self.num_envs * [np.array(self.default_dof_pos, dtype=np.float32)]
         )
         self.frankas.set_dof_positions(init_dof_pos, self.franka_indices)
 
-        # End-effector (hand) view
         self.hands = sim.create_rigid_body_view("/World/envs/*/franka/panda_hand")
         init_hand_transforms = self.hands.get_transforms().copy()
         self.init_pos = init_hand_transforms[:, :3]
         self.init_rot = init_hand_transforms[:, 3:]
 
-        # Deformable box view
         if deformable_beta_on:
             self.boxes = sim.create_volume_deformable_body_view("/World/envs/*/box")
         else:
             self.boxes = sim.create_soft_body_view("/World/envs/*/box")
 
-        # Box corner coords for grasping angle
         box_half_size = 0.5 * self.box_size
         corner_coord = np.array([box_half_size, box_half_size, box_half_size])
         self.corners = np.stack(self.num_envs * [corner_coord])
@@ -912,13 +959,14 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
 
         # ==================================================================
         # >>> TASHAN SENSOR INITIALISATION <<<
+        # Native TSsensor + RigidPrim + Rerun are loaded HERE (deferred),
+        # not at module import time.
         # ==================================================================
         if self._sensor_manager is not None:
             self._sensor_manager.init_tensor_views(sim)
             self._sensor_manager.init_rigid_prim_sensors()
             self._sensor_manager.init_rerun()
 
-        # Prevent GC
         self.sim = sim
 
     # ------------------------------------------------------------------
@@ -926,20 +974,16 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
     # ------------------------------------------------------------------
 
     def on_physics_step(self, dt):
-        # --- Box transforms ------------------------------------------------
         box_transforms = self.boxes.get_transforms()
         box_pos = box_transforms[:, :3]
 
-        # --- End-effector transforms ---------------------------------------
         hand_transforms = self.hands.get_transforms()
         hand_pos = hand_transforms[:, :3]
         hand_rot = hand_transforms[:, 3:]
 
-        # --- Franka DOF state & Jacobians ----------------------------------
         dof_pos = self.frankas.get_dof_positions()
         jacobians = self.frankas.get_jacobians()
 
-        # --- Direction from hand to box ------------------------------------
         to_box = box_pos - hand_pos
         box_dist = np.linalg.norm(to_box, axis=1)
         box_dir = to_box / box_dist[:, None]
@@ -947,16 +991,13 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
 
         grasp_offset = 0.10
 
-        # --- Grip detection ------------------------------------------------
         gripper_sep = dof_pos[:, 7] + dof_pos[:, 8]
         gripped = (gripper_sep < self.box_size) & (box_dist < grasp_offset * 2.0)
 
-        # --- Unreachable check ---------------------------------------------
         from_start = box_pos - self.init_box_transforms[:, :3]
         start_dist = np.linalg.norm(from_start, axis=1)
         unreachable = start_dist > 0.5
 
-        # --- Goal position -------------------------------------------------
         above_box = (box_dot >= 0.9) & (box_dist < grasp_offset * 3)
         grasp_pos = box_pos.copy()
         grasp_pos[:, 2] = np.where(
@@ -967,7 +1008,6 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
         goal_pos = np.where(gripped[:, None], self.init_pos, grasp_pos)
         goal_rot = self.down_q
 
-        # --- IK (damped least squares) -------------------------------------
         pos_err = goal_pos - hand_pos
         max_err = 0.05
         pos_err_mag = np.linalg.norm(pos_err, axis=1)[:, None] + 0.0001
@@ -988,7 +1028,6 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
 
         pos_targets = dof_pos + u
 
-        # --- Gripper control -----------------------------------------------
         if self.loop:
             close_gripper = np.where(
                 gripped,
@@ -1007,7 +1046,6 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
         )
         pos_targets[:, 7:9] = grip_acts
 
-        # Reset if unreachable
         pos_targets = np.where(
             unreachable[:, None], self.default_dof_pos, pos_targets
         )
@@ -1016,7 +1054,6 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
 
         # ==================================================================
         # >>> TASHAN SENSOR UPDATE <<<
-        # Read all finger sensors and push data to Rerun
         # ==================================================================
         if self._sensor_manager is not None:
             self._sensor_manager.read_sensors()
@@ -1027,7 +1064,6 @@ class FrankaDeformableSensorDemo(demo.AsyncDemoBase):
     # ------------------------------------------------------------------
 
     def on_shutdown(self):
-        # Save sensor plots before cleanup
         if self._sensor_manager is not None:
             self._sensor_manager.draw_data(env_idx=0)
             self._sensor_manager.cleanup()
