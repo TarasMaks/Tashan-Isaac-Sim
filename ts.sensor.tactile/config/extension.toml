@@ -20,12 +20,6 @@ icon = "data/icon.png"
 "omni.kit.uiapp" = {}
 "isaacsim.gui.components" = {}
 "isaacsim.core.api" = {}
-"isaacsim.core.prims" = {}
-"isaacsim.sensors.physx" = {}
-"isaacsim.storage.native" = {}
-
-# Optional: only needed if running franka_sensor_demo.py
-# "omni.physxdemos" = {optional = true}
 
 [[python.module]]
 name = "ts_tactile_extension_python"
