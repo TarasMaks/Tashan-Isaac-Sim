@@ -21,7 +21,6 @@ icon = "data/icon.png"
 "isaacsim.core.api" = {}
 "isaacsim.examples.browser" = {}
 "isaacsim.examples.interactive" = {}
-"isaacsim.manipulators" = {}
 "ts.sensor.tactile" = {}  # Dependency on Tashan sensor extension
 
 [[python.module]]
