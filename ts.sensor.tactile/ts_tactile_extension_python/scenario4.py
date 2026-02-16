@@ -106,8 +106,15 @@ class ExampleScenario(ScenarioTemplate):
     # ------------------------------------------------------------------
     # Public lifecycle (called by UIBuilder)
     # ------------------------------------------------------------------
+    def load_assets(self):
+        """Load all USD references, transforms, joints, and objects onto the
+        stage.  Must be called from setup_scene_fn (BEFORE World.reset) so
+        that the physics tensor system discovers every articulation during
+        its initialisation pass."""
+        self._load_stage_assets()
+
     def setup_scenario(self, articulation, object_prim):
-        self._set_up_sensor_and_scene()
+        self._create_physics_wrappers()
         self._running_scenario = True
         self._phase = self.PHASE_APPROACH
         self._phase_step = 0
@@ -346,84 +353,93 @@ class ExampleScenario(ScenarioTemplate):
         rr.log("grasp/phase", rr.Scalar(self._phase))
 
     # ------------------------------------------------------------------
-    # Scene assembly
+    # Scene assembly — split into two phases:
+    #   1. _load_stage_assets()   → USD refs, xforms, joints, objects
+    #                               Called from setup_scene_fn (BEFORE
+    #                               World.reset / physics init).
+    #   2. _create_physics_wrappers() → SingleArticulation, RigidPrim
+    #                               Called from setup_post_load_fn
+    #                               (AFTER physics init).
     # ------------------------------------------------------------------
-    def _set_up_sensor_and_scene(self):
+    PANDA_PRIM_PATH = "/World/Panda"
+    LEFT_SENSOR_PATH = "/World/TipLeft"
+    RIGHT_SENSOR_PATH = "/World/TipRight"
+    CUBE_PRIM_PATH = "/World/TransparentCube"
+
+    def _load_stage_assets(self):
+        """Phase 1: populate the USD stage with all geometry, joints and
+        objects so that the physics tensor system discovers them during
+        the subsequent ``World.reset_async()``."""
         stage = get_current_stage()
 
         # ---- 1. Load Panda robot ----
-        panda_prim_path = "/World/Panda"
         panda_usd = get_assets_root_path() + "/Isaac/Robots/Franka/franka_alt_fingers.usd"
-        add_reference_to_stage(usd_path=panda_usd, prim_path=panda_prim_path)
+        add_reference_to_stage(usd_path=panda_usd, prim_path=self.PANDA_PRIM_PATH)
         print(f"Loading Panda from {panda_usd}")
-
-        self._articulation = SingleArticulation(panda_prim_path)
 
         # ---- 2. Load Tashan TS-F-A sensors on each finger ----
         ts_usd = os.path.join(os.path.dirname(__file__), "../assets/TS-F-A.usd")
 
         # -- Left finger sensor --
-        left_path = "/World/TipLeft"
-        prim_left = add_reference_to_stage(usd_path=ts_usd, prim_path=left_path)
+        prim_left = add_reference_to_stage(usd_path=ts_usd, prim_path=self.LEFT_SENSOR_PATH)
         xform_l = UsdGeom.Xformable(prim_left)
         xform_l.ClearXformOpOrder()
-        # Place at left finger tip; sensing surface rotated to face inward (-Y)
         xform_l.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0.05))
         xform_l.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(90, 0, 0))
 
         # -- Right finger sensor --
-        right_path = "/World/TipRight"
-        prim_right = add_reference_to_stage(usd_path=ts_usd, prim_path=right_path)
+        prim_right = add_reference_to_stage(usd_path=ts_usd, prim_path=self.RIGHT_SENSOR_PATH)
         xform_r = UsdGeom.Xformable(prim_right)
         xform_r.ClearXformOpOrder()
-        # Place at right finger tip; sensing surface rotated to face inward (+Y)
         xform_r.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0.05))
         xform_r.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(-90, 0, 0))
 
         print(f"Loading Tashan sensors from {ts_usd}")
 
         # ---- 3. Attach sensors to Panda fingers via FixedJoints ----
-        # Left sensor rigid base → left finger rigid body
         left_joint = UsdPhysics.FixedJoint.Define(stage, "/World/FixedJointLeft")
-        left_joint.CreateBody0Rel().SetTargets([Sdf.Path(panda_prim_path + "/panda_leftfinger")])
-        left_joint.CreateBody1Rel().SetTargets([Sdf.Path(left_path)])
+        left_joint.CreateBody0Rel().SetTargets([Sdf.Path(self.PANDA_PRIM_PATH + "/panda_leftfinger")])
+        left_joint.CreateBody1Rel().SetTargets([Sdf.Path(self.LEFT_SENSOR_PATH)])
         left_joint.CreateLocalPos0Attr().Set(Gf.Vec3f(0, 0, 0.04))
         left_joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0, 0, 0))
 
-        # Right sensor rigid base → right finger rigid body
         right_joint = UsdPhysics.FixedJoint.Define(stage, "/World/FixedJointRight")
-        right_joint.CreateBody0Rel().SetTargets([Sdf.Path(panda_prim_path + "/panda_rightfinger")])
-        right_joint.CreateBody1Rel().SetTargets([Sdf.Path(right_path)])
+        right_joint.CreateBody0Rel().SetTargets([Sdf.Path(self.PANDA_PRIM_PATH + "/panda_rightfinger")])
+        right_joint.CreateBody1Rel().SetTargets([Sdf.Path(self.RIGHT_SENSOR_PATH)])
         right_joint.CreateLocalPos0Attr().Set(Gf.Vec3f(0, 0, 0.04))
         right_joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0, 0, 0))
 
         # ---- 4. Create transparent cube ----
         cube_size = 0.04  # 4 cm
         self.cube = DynamicCuboid(
-            prim_path="/World/TransparentCube",
+            prim_path=self.CUBE_PRIM_PATH,
             name="transparent_cube",
             position=np.array([0.4, 0.0, cube_size / 2 + 0.001]),
             scale=np.array([cube_size, cube_size, cube_size]),
             color=np.array([0.2, 0.6, 1.0]),
             mass=0.1,
         )
-        # Apply translucent material
-        self._make_prim_transparent("/World/TransparentCube", opacity=0.35)
+        self._make_prim_transparent(self.CUBE_PRIM_PATH, opacity=0.35)
 
-        # ---- 5. Set up tactile sensor interfaces ----
-        cube_filter = ["/World/TransparentCube"]
+    def _create_physics_wrappers(self):
+        """Phase 2: create physics-backed wrappers.  Called from
+        ``setup_post_load_fn`` AFTER ``World.reset_async()`` has run so
+        the tensor system already knows about every articulation."""
+        self._articulation = SingleArticulation(self.PANDA_PRIM_PATH)
 
-        self.range_left = f"{left_path}/pad_4/LightBeam_Sensor"
+        cube_filter = [self.CUBE_PRIM_PATH]
+
+        self.range_left = f"{self.LEFT_SENSOR_PATH}/pad_4/LightBeam_Sensor"
         self.tactile_left = RigidPrim(
-            prim_paths_expr=f"{left_path}/pad_[1-7]",
+            prim_paths_expr=f"{self.LEFT_SENSOR_PATH}/pad_[1-7]",
             name="finger_tactile_left",
             contact_filter_prim_paths_expr=cube_filter,
             max_contact_count=7 * 5,
         )
 
-        self.range_right = f"{right_path}/pad_4/LightBeam_Sensor"
+        self.range_right = f"{self.RIGHT_SENSOR_PATH}/pad_4/LightBeam_Sensor"
         self.tactile_right = RigidPrim(
-            prim_paths_expr=f"{right_path}/pad_[1-7]",
+            prim_paths_expr=f"{self.RIGHT_SENSOR_PATH}/pad_[1-7]",
             name="finger_tactile_right",
             contact_filter_prim_paths_expr=cube_filter,
             max_contact_count=7 * 5,

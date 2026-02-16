@@ -169,6 +169,10 @@ class UIBuilder:
         create_new_stage()
         self._add_light_to_stage()
 
+        # Load all USD assets onto the stage BEFORE World.reset() so that
+        # the physics tensor system discovers every articulation on init.
+        self._scenario.load_assets()
+
         # Add user-loaded objects to the World
         self.world = World.instance()
 
