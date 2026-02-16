@@ -24,7 +24,7 @@ from omni.usd import StageEventType
 from pxr import Sdf, UsdLux
 
 
-from .scenario import ExampleScenario
+from .scenario4 import ExampleScenario
 
 
 class UIBuilder:
@@ -181,7 +181,8 @@ class UIBuilder:
         self._scenario.setup_scenario(self._articulation, self._cuboid)
         self.world.scene.add_default_ground_plane()
         self.world.scene.add(self._scenario._articulation)
-        self.world.scene.add(self._scenario.tactile)
+        self.world.scene.add(self._scenario.tactile_left)
+        self.world.scene.add(self._scenario.tactile_right)
 
         # UI management
         self._scenario_state_btn.reset()
