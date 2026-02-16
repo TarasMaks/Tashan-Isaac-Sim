@@ -169,12 +169,14 @@ class UIBuilder:
         create_new_stage()
         self._add_light_to_stage()
 
-        # Load all USD assets onto the stage BEFORE World.reset() so that
-        # the physics tensor system discovers every articulation on init.
-        self._scenario.load_assets()
-
         # Add user-loaded objects to the World
         self.world = World.instance()
+
+        # Load Franka robot via Robot class and register with world.scene
+        # BEFORE World.reset_async() so the Nucleus/S3 download resolves
+        # and the physics tensor system discovers the articulation on init.
+        self._scenario.load_robot()
+        self.world.scene.add(self._scenario._panda_robot)
 
     def _setup_scenario(self):
         """
@@ -184,7 +186,8 @@ class UIBuilder:
         """
         self._scenario.setup_scenario(self._articulation, self._cuboid)
         self.world.scene.add_default_ground_plane()
-        self.world.scene.add(self._scenario._articulation)
+        # Robot already registered with world.scene in _setup_scene;
+        # only add the newly created tactile sensor wrappers.
         self.world.scene.add(self._scenario.tactile_left)
         self.world.scene.add(self._scenario.tactile_right)
 

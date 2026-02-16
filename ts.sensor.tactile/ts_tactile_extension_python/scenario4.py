@@ -16,6 +16,7 @@
 from isaacsim.sensors.physx import _range_sensor
 from isaacsim.core.prims import RigidPrim
 from isaacsim.core.api.objects import DynamicCuboid
+from isaacsim.core.api.robots import Robot
 from isaacsim.core.prims import SingleArticulation, XFormPrim
 
 from isaacsim.core.utils.types import ArticulationAction
@@ -56,6 +57,14 @@ placed on the table for the robot to grasp.
 
 All 11 channels from both sensors are logged per physics step and
 plotted to PNG files on STOP.
+
+Asset loading is split into two phases:
+  Phase 1 (_load_robot)       — called from setup_scene_fn BEFORE
+      World.reset so the Franka USD (fetched from Nucleus / S3) is
+      fully resolved during the physics-init pass.
+  Phase 2 (_build_sensor_scene) — called from setup_post_load_fn AFTER
+      World.reset so that the Panda child prims (panda_leftfinger etc.)
+      exist and can be referenced by FixedJoints and RigidPrim.
 """
 
 
@@ -88,8 +97,15 @@ class ExampleScenario(ScenarioTemplate):
         "Capacitance Ch7",
     ]
 
+    # Prim paths
+    PANDA_PRIM_PATH = "/World/Panda"
+    LEFT_SENSOR_PATH = "/World/TipLeft"
+    RIGHT_SENSOR_PATH = "/World/TipRight"
+    CUBE_PRIM_PATH = "/World/TransparentCube"
+
     def __init__(self):
         self._articulation = None
+        self._panda_robot = None
         self._running_scenario = False
         self._time = 0.0
         self._phase = self.PHASE_APPROACH
@@ -106,15 +122,30 @@ class ExampleScenario(ScenarioTemplate):
     # ------------------------------------------------------------------
     # Public lifecycle (called by UIBuilder)
     # ------------------------------------------------------------------
-    def load_assets(self):
-        """Load all USD references, transforms, joints, and objects onto the
-        stage.  Must be called from setup_scene_fn (BEFORE World.reset) so
-        that the physics tensor system discovers every articulation during
-        its initialisation pass."""
-        self._load_stage_assets()
+    def load_robot(self):
+        """Phase 1: create Robot wrapper which adds the Franka USD
+        reference to stage.  Must be called from setup_scene_fn BEFORE
+        World.reset so the async Nucleus download resolves and the
+        physics tensor system discovers the articulation on init.
+
+        The caller (UIBuilder) must then do:
+            world.scene.add(scenario._panda_robot)
+        so that World.reset_async() initialises the articulation view.
+        """
+        panda_usd = get_assets_root_path() + "/Isaac/Robots/Franka/franka_alt_fingers.usd"
+        print(f"Loading Panda from {panda_usd}")
+        self._panda_robot = Robot(
+            prim_path=self.PANDA_PRIM_PATH,
+            name="panda_robot",
+            usd_path=panda_usd,
+        )
 
     def setup_scenario(self, articulation, object_prim):
-        self._create_physics_wrappers()
+        """Phase 2: called from setup_post_load_fn AFTER World.reset.
+        Panda child prims now exist — load local sensor USDs, create
+        FixedJoints, cube, and tactile RigidPrim wrappers."""
+        self._build_sensor_scene()
+        self._articulation = self._panda_robot
         self._running_scenario = True
         self._phase = self.PHASE_APPROACH
         self._phase_step = 0
@@ -137,7 +168,7 @@ class ExampleScenario(ScenarioTemplate):
         self.sensorFrameDataLeft = TSsensor(self.tactile_left, self.range_left)
         self.sensorFrameDataRight = TSsensor(self.tactile_right, self.range_right)
 
-        # Buffer every frame (no cap – STOP triggers plot)
+        # Buffer every frame (no cap - STOP triggers plot)
         self.sensorBufferLeft.append(list(self.sensorFrameDataLeft))
         self.sensorBufferRight.append(list(self.sensorFrameDataRight))
 
@@ -331,7 +362,7 @@ class ExampleScenario(ScenarioTemplate):
     # Rerun telemetry
     # ------------------------------------------------------------------
     def _update_rerun_visualization(self):
-        # Left finger — all 11 channels
+        # Left finger - all 11 channels
         rr.log("left/proximity", rr.Scalar(self.sensorFrameDataLeft[0]))
         rr.log("left/force_normal", rr.Scalar(self.sensorFrameDataLeft[1]))
         rr.log("left/force_tangential", rr.Scalar(self.sensorFrameDataLeft[2]))
@@ -340,7 +371,7 @@ class ExampleScenario(ScenarioTemplate):
             for i in range(7):
                 rr.log(f"left/capacitance/ch_{i + 1}", rr.Scalar(self.sensorFrameDataLeft[4 + i]))
 
-        # Right finger — all 11 channels
+        # Right finger - all 11 channels
         rr.log("right/proximity", rr.Scalar(self.sensorFrameDataRight[0]))
         rr.log("right/force_normal", rr.Scalar(self.sensorFrameDataRight[1]))
         rr.log("right/force_tangential", rr.Scalar(self.sensorFrameDataRight[2]))
@@ -353,50 +384,33 @@ class ExampleScenario(ScenarioTemplate):
         rr.log("grasp/phase", rr.Scalar(self._phase))
 
     # ------------------------------------------------------------------
-    # Scene assembly — split into two phases:
-    #   1. _load_stage_assets()   → USD refs, xforms, joints, objects
-    #                               Called from setup_scene_fn (BEFORE
-    #                               World.reset / physics init).
-    #   2. _create_physics_wrappers() → SingleArticulation, RigidPrim
-    #                               Called from setup_post_load_fn
-    #                               (AFTER physics init).
+    # Scene assembly
     # ------------------------------------------------------------------
-    PANDA_PRIM_PATH = "/World/Panda"
-    LEFT_SENSOR_PATH = "/World/TipLeft"
-    RIGHT_SENSOR_PATH = "/World/TipRight"
-    CUBE_PRIM_PATH = "/World/TransparentCube"
-
-    def _load_stage_assets(self):
-        """Phase 1: populate the USD stage with all geometry, joints and
-        objects so that the physics tensor system discovers them during
-        the subsequent ``World.reset_async()``."""
+    def _build_sensor_scene(self):
+        """Called from setup_scenario (AFTER World.reset).  At this point
+        the Panda articulation is fully resolved — child prims like
+        panda_leftfinger exist and can be referenced by joints."""
         stage = get_current_stage()
-
-        # ---- 1. Load Panda robot ----
-        panda_usd = get_assets_root_path() + "/Isaac/Robots/Franka/franka_alt_fingers.usd"
-        add_reference_to_stage(usd_path=panda_usd, prim_path=self.PANDA_PRIM_PATH)
-        print(f"Loading Panda from {panda_usd}")
-
-        # ---- 2. Load Tashan TS-F-A sensors on each finger ----
         ts_usd = os.path.join(os.path.dirname(__file__), "../assets/TS-F-A.usd")
 
-        # -- Left finger sensor --
+        # ---- 1. Load Tashan TS-F-A sensors on each finger ----
+        # Left finger sensor — pad faces inward (-Y toward right finger)
         prim_left = add_reference_to_stage(usd_path=ts_usd, prim_path=self.LEFT_SENSOR_PATH)
         xform_l = UsdGeom.Xformable(prim_left)
         xform_l.ClearXformOpOrder()
         xform_l.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0.05))
-        xform_l.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(90, 0, 0))
+        xform_l.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(-90, 0, 0))
 
-        # -- Right finger sensor --
+        # Right finger sensor — pad faces inward (+Y toward left finger)
         prim_right = add_reference_to_stage(usd_path=ts_usd, prim_path=self.RIGHT_SENSOR_PATH)
         xform_r = UsdGeom.Xformable(prim_right)
         xform_r.ClearXformOpOrder()
         xform_r.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0.05))
-        xform_r.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(-90, 0, 0))
+        xform_r.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(90, 0, 0))
 
         print(f"Loading Tashan sensors from {ts_usd}")
 
-        # ---- 3. Attach sensors to Panda fingers via FixedJoints ----
+        # ---- 2. Attach sensors to Panda fingers via FixedJoints ----
         left_joint = UsdPhysics.FixedJoint.Define(stage, "/World/FixedJointLeft")
         left_joint.CreateBody0Rel().SetTargets([Sdf.Path(self.PANDA_PRIM_PATH + "/panda_leftfinger")])
         left_joint.CreateBody1Rel().SetTargets([Sdf.Path(self.LEFT_SENSOR_PATH)])
@@ -409,7 +423,7 @@ class ExampleScenario(ScenarioTemplate):
         right_joint.CreateLocalPos0Attr().Set(Gf.Vec3f(0, 0, 0.04))
         right_joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0, 0, 0))
 
-        # ---- 4. Create transparent cube ----
+        # ---- 3. Create transparent cube ----
         cube_size = 0.04  # 4 cm
         self.cube = DynamicCuboid(
             prim_path=self.CUBE_PRIM_PATH,
@@ -421,12 +435,7 @@ class ExampleScenario(ScenarioTemplate):
         )
         self._make_prim_transparent(self.CUBE_PRIM_PATH, opacity=0.35)
 
-    def _create_physics_wrappers(self):
-        """Phase 2: create physics-backed wrappers.  Called from
-        ``setup_post_load_fn`` AFTER ``World.reset_async()`` has run so
-        the tensor system already knows about every articulation."""
-        self._articulation = SingleArticulation(self.PANDA_PRIM_PATH)
-
+        # ---- 4. Set up tactile sensor interfaces ----
         cube_filter = [self.CUBE_PRIM_PATH]
 
         self.range_left = f"{self.LEFT_SENSOR_PATH}/pad_4/LightBeam_Sensor"
