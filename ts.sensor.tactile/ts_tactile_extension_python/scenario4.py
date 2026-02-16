@@ -16,8 +16,7 @@
 from isaacsim.sensors.physx import _range_sensor
 from isaacsim.core.prims import RigidPrim
 from isaacsim.core.api.objects import DynamicCuboid
-from isaacsim.core.api.robots import Robot
-from isaacsim.core.prims import SingleArticulation, XFormPrim
+from isaacsim.core.prims import Articulation, SingleArticulation, XFormPrim
 
 from isaacsim.core.utils.types import ArticulationAction
 from isaacsim.core.utils.viewports import set_camera_view
@@ -123,27 +122,20 @@ class ExampleScenario(ScenarioTemplate):
     # Public lifecycle (called by UIBuilder)
     # ------------------------------------------------------------------
     def load_robot(self):
-        """Phase 1: create Robot wrapper which adds the Franka USD
-        reference to stage.  Must be called from setup_scene_fn BEFORE
-        World.reset so the async Nucleus download resolves and the
-        physics tensor system discovers the articulation on init.
-
-        The caller (UIBuilder) must then do:
-            world.scene.add(scenario._panda_robot)
-        so that World.reset_async() initialises the articulation view.
-        """
-        panda_usd = get_assets_root_path() + "/Isaac/Robots/Franka/franka_alt_fingers.usd"
+        """Phase 1: add Franka USD reference to stage.  Must be called
+        from setup_scene_fn BEFORE World.reset so the Nucleus download
+        resolves and the physics tensor system discovers the articulation
+        during its init pass."""
+        panda_usd = get_assets_root_path() + "/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd"
         print(f"Loading Panda from {panda_usd}")
-        self._panda_robot = Robot(
-            prim_path=self.PANDA_PRIM_PATH,
-            name="panda_robot",
-            usd_path=panda_usd,
-        )
+        add_reference_to_stage(usd_path=panda_usd, prim_path=self.PANDA_PRIM_PATH)
 
     def setup_scenario(self, articulation, object_prim):
         """Phase 2: called from setup_post_load_fn AFTER World.reset.
-        Panda child prims now exist — load local sensor USDs, create
-        FixedJoints, cube, and tactile RigidPrim wrappers."""
+        Panda child prims now exist — create the Articulation wrapper,
+        load local sensor USDs, create FixedJoints, cube, and tactile
+        RigidPrim wrappers."""
+        self._panda_robot = Articulation(prim_paths_expr=self.PANDA_PRIM_PATH, name="panda_robot")
         self._build_sensor_scene()
         self._articulation = self._panda_robot
         self._running_scenario = True

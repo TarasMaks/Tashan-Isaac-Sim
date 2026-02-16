@@ -172,11 +172,10 @@ class UIBuilder:
         # Add user-loaded objects to the World
         self.world = World.instance()
 
-        # Load Franka robot via Robot class and register with world.scene
-        # BEFORE World.reset_async() so the Nucleus/S3 download resolves
-        # and the physics tensor system discovers the articulation on init.
+        # Add Franka USD reference to stage BEFORE World.reset_async()
+        # so the Nucleus download resolves and the physics tensor system
+        # discovers the articulation during init.
         self._scenario.load_robot()
-        self.world.scene.add(self._scenario._panda_robot)
 
     def _setup_scenario(self):
         """
