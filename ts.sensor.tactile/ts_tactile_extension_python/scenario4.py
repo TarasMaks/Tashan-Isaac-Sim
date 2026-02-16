@@ -122,20 +122,22 @@ class ExampleScenario(ScenarioTemplate):
     # Public lifecycle (called by UIBuilder)
     # ------------------------------------------------------------------
     def load_robot(self):
-        """Phase 1: add Franka USD reference to stage.  Must be called
-        from setup_scene_fn BEFORE World.reset so the Nucleus download
-        resolves and the physics tensor system discovers the articulation
-        during its init pass."""
+        """Phase 1: add Franka USD reference to stage AND create the
+        Articulation wrapper.  Must be called from setup_scene_fn
+        BEFORE World.reset so the Nucleus download resolves and the
+        physics tensor system discovers the articulation during its
+        init pass.  (Matches the pattern used in GettingStartedRobot.)"""
         panda_usd = get_assets_root_path() + "/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd"
         print(f"Loading Panda from {panda_usd}")
         add_reference_to_stage(usd_path=panda_usd, prim_path=self.PANDA_PRIM_PATH)
+        # Create Articulation wrapper in the same phase as the USD load,
+        # just like the reference GettingStartedRobot example.
+        self._panda_robot = Articulation(prim_paths_expr=self.PANDA_PRIM_PATH, name="panda_robot")
 
     def setup_scenario(self, articulation, object_prim):
         """Phase 2: called from setup_post_load_fn AFTER World.reset.
-        Panda child prims now exist — create the Articulation wrapper,
-        load local sensor USDs, create FixedJoints, cube, and tactile
-        RigidPrim wrappers."""
-        self._panda_robot = Articulation(prim_paths_expr=self.PANDA_PRIM_PATH, name="panda_robot")
+        Panda child prims now exist — load local sensor USDs, create
+        FixedJoints, cube, and tactile RigidPrim wrappers."""
         self._build_sensor_scene()
         self._articulation = self._panda_robot
         self._running_scenario = True
@@ -385,6 +387,21 @@ class ExampleScenario(ScenarioTemplate):
         stage = get_current_stage()
         ts_usd = os.path.join(os.path.dirname(__file__), "../assets/TS-F-A.usd")
 
+        # ---- 0. Verify Panda finger prims exist ----
+        panda_prim = stage.GetPrimAtPath(self.PANDA_PRIM_PATH)
+        if panda_prim.IsValid():
+            children = [c.GetName() for c in panda_prim.GetChildren()]
+            print(f"[Scenario4] Panda children: {children}")
+        else:
+            print(f"[Scenario4] WARNING: Panda prim not found at {self.PANDA_PRIM_PATH}")
+
+        left_finger_path = self.PANDA_PRIM_PATH + "/panda_leftfinger"
+        right_finger_path = self.PANDA_PRIM_PATH + "/panda_rightfinger"
+        left_finger = stage.GetPrimAtPath(left_finger_path)
+        right_finger = stage.GetPrimAtPath(right_finger_path)
+        print(f"[Scenario4] Left finger valid: {left_finger.IsValid()} at {left_finger_path}")
+        print(f"[Scenario4] Right finger valid: {right_finger.IsValid()} at {right_finger_path}")
+
         # ---- 1. Load Tashan TS-F-A sensors on each finger ----
         # Left finger sensor — pad faces inward (-Y toward right finger)
         prim_left = add_reference_to_stage(usd_path=ts_usd, prim_path=self.LEFT_SENSOR_PATH)
@@ -400,20 +417,24 @@ class ExampleScenario(ScenarioTemplate):
         xform_r.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0.05))
         xform_r.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(90, 0, 0))
 
-        print(f"Loading Tashan sensors from {ts_usd}")
+        print(f"[Scenario4] Loading Tashan sensors from {ts_usd}")
 
         # ---- 2. Attach sensors to Panda fingers via FixedJoints ----
-        left_joint = UsdPhysics.FixedJoint.Define(stage, "/World/FixedJointLeft")
-        left_joint.CreateBody0Rel().SetTargets([Sdf.Path(self.PANDA_PRIM_PATH + "/panda_leftfinger")])
-        left_joint.CreateBody1Rel().SetTargets([Sdf.Path(self.LEFT_SENSOR_PATH)])
-        left_joint.CreateLocalPos0Attr().Set(Gf.Vec3f(0, 0, 0.04))
-        left_joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0, 0, 0))
+        if left_finger.IsValid() and right_finger.IsValid():
+            left_joint = UsdPhysics.FixedJoint.Define(stage, "/World/FixedJointLeft")
+            left_joint.CreateBody0Rel().SetTargets([Sdf.Path(left_finger_path)])
+            left_joint.CreateBody1Rel().SetTargets([Sdf.Path(self.LEFT_SENSOR_PATH)])
+            left_joint.CreateLocalPos0Attr().Set(Gf.Vec3f(0, 0, 0.04))
+            left_joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0, 0, 0))
 
-        right_joint = UsdPhysics.FixedJoint.Define(stage, "/World/FixedJointRight")
-        right_joint.CreateBody0Rel().SetTargets([Sdf.Path(self.PANDA_PRIM_PATH + "/panda_rightfinger")])
-        right_joint.CreateBody1Rel().SetTargets([Sdf.Path(self.RIGHT_SENSOR_PATH)])
-        right_joint.CreateLocalPos0Attr().Set(Gf.Vec3f(0, 0, 0.04))
-        right_joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0, 0, 0))
+            right_joint = UsdPhysics.FixedJoint.Define(stage, "/World/FixedJointRight")
+            right_joint.CreateBody0Rel().SetTargets([Sdf.Path(right_finger_path)])
+            right_joint.CreateBody1Rel().SetTargets([Sdf.Path(self.RIGHT_SENSOR_PATH)])
+            right_joint.CreateLocalPos0Attr().Set(Gf.Vec3f(0, 0, 0.04))
+            right_joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0, 0, 0))
+            print("[Scenario4] FixedJoints created for both fingers")
+        else:
+            print("[Scenario4] ERROR: Finger prims not found — skipping FixedJoint creation")
 
         # ---- 3. Create transparent cube ----
         cube_size = 0.04  # 4 cm
