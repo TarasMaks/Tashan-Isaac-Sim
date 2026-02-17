@@ -62,9 +62,12 @@ plotted to PNG files on STOP.
 
 Asset loading is split into two phases:
   Phase 1 (load_robot)         — called from setup_scene_fn BEFORE
-      World.reset so the Franka USD is resolved during the physics-init.
+      World.reset.  Loads the Franka USD, both sensor USDs (parented
+      under finger prims), and disables the sensors' articulations.
+      This ensures the physics system processes ALL rigid bodies
+      (including sensor pads) in its init pass.
   Phase 2 (_build_sensor_scene) — called from setup_post_load_fn AFTER
-      World.reset so that finger prims exist and sensors can be parented.
+      World.reset.  Creates the cube and the RigidPrim contact wrappers.
 """
 
 
@@ -126,16 +129,60 @@ class ExampleScenario(ScenarioTemplate):
     # Public lifecycle (called by UIBuilder)
     # ------------------------------------------------------------------
     def load_robot(self):
-        """Phase 1: add Franka USD reference to stage AND create the
-        Articulation wrapper.  Must be called from setup_scene_fn
-        BEFORE World.reset so the Nucleus download resolves and the
-        physics tensor system discovers the articulation during its
-        init pass.  (Matches the pattern used in GettingStartedRobot.)"""
+        """Phase 1: called from setup_scene_fn BEFORE World.reset.
+
+        Loads the Franka robot USD, the two Tashan sensor USDs (parented
+        under each finger prim), disables the sensors' own articulations,
+        and creates the Articulation wrapper.  Everything is on the USD
+        stage before World.reset so the physics tensor system discovers
+        all rigid bodies (including sensor pads) in one pass."""
+        stage = get_current_stage()
+        ts_usd = os.path.join(os.path.dirname(__file__), "../assets/TS-F-A.usd")
+
+        # ---- 1. Load Franka robot ----
         panda_usd = get_assets_root_path() + "/Isaac/Robots/FrankaRobotics/FrankaPanda/franka.usd"
-        print(f"Loading Panda from {panda_usd}")
+        print(f"[Scenario4] Loading Panda from {panda_usd}")
         add_reference_to_stage(usd_path=panda_usd, prim_path=self.PANDA_PRIM_PATH)
-        # Create Articulation wrapper in the same phase as the USD load,
-        # just like the reference GettingStartedRobot example.
+
+        # ---- 2. Load sensors as children of finger prims ----
+        # Sensor default: pads face +Z (upward in standalone scenarios).
+        # User confirmed Rx(+90°)/Rx(-90°) made pads face OUTWARD.
+        # Invert: Rx(-90°) for left, Rx(+90°) for right.
+        prim_left = add_reference_to_stage(usd_path=ts_usd, prim_path=self.LEFT_SENSOR_PATH)
+        xform_l = UsdGeom.Xformable(prim_left)
+        xform_l.ClearXformOpOrder()
+        xform_l.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0.04))
+        xform_l.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(-90, 0, 0))
+
+        prim_right = add_reference_to_stage(usd_path=ts_usd, prim_path=self.RIGHT_SENSOR_PATH)
+        xform_r = UsdGeom.Xformable(prim_right)
+        xform_r.ClearXformOpOrder()
+        xform_r.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0.04))
+        xform_r.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(90, 0, 0))
+
+        print(f"[Scenario4] Loaded Tashan sensors from {ts_usd}")
+        print(f"[Scenario4]   Left sensor at {self.LEFT_SENSOR_PATH}")
+        print(f"[Scenario4]   Right sensor at {self.RIGHT_SENSOR_PATH}")
+
+        # ---- 3. Disable the sensors' own articulations ----
+        # The TS-F-A USD has a root_joint that would create a nested
+        # articulation inside the Panda's tree.
+        for sensor_path in [self.LEFT_SENSOR_PATH, self.RIGHT_SENSOR_PATH]:
+            sensor_prim = stage.GetPrimAtPath(sensor_path)
+            if sensor_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+                sensor_prim.RemoveAPI(UsdPhysics.ArticulationRootAPI)
+                print(f"[Scenario4] Removed ArticulationRootAPI from {sensor_path}")
+
+            joint_path = f"{sensor_path}/root_joint"
+            joint_prim = stage.GetPrimAtPath(joint_path)
+            if joint_prim.IsValid():
+                if joint_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+                    joint_prim.RemoveAPI(UsdPhysics.ArticulationRootAPI)
+                    print(f"[Scenario4] Removed ArticulationRootAPI from {joint_path}")
+                joint_prim.SetActive(False)
+                print(f"[Scenario4] Deactivated {joint_path}")
+
+        # ---- 4. Create Articulation wrapper ----
         self._panda_robot = Articulation(prim_paths_expr=self.PANDA_PRIM_PATH, name="panda_robot")
 
     def setup_scenario(self, articulation, object_prim):
@@ -382,91 +429,14 @@ class ExampleScenario(ScenarioTemplate):
         rr.log("grasp/phase", rr.Scalar(self._phase))
 
     # ------------------------------------------------------------------
-    # Scene assembly
+    # Scene assembly (phase 2 — after World.reset)
     # ------------------------------------------------------------------
     def _build_sensor_scene(self):
-        """Called from setup_scenario (AFTER World.reset).  At this point
-        the Panda articulation is fully resolved — child prims like
-        panda_leftfinger exist.
+        """Create the transparent cube and RigidPrim wrappers for sensor
+        pads.  All USD loading already happened in load_robot (phase 1)
+        so the physics system has processed the rigid bodies."""
 
-        Sensors are loaded as CHILDREN of the finger prims so they
-        automatically inherit the finger's world transform (no FixedJoints
-        needed).  The sensor's own ArticulationRootAPI and root_joint are
-        disabled so they don't conflict with the Panda articulation."""
-        stage = get_current_stage()
-        ts_usd = os.path.join(os.path.dirname(__file__), "../assets/TS-F-A.usd")
-
-        # ---- 0. Verify Panda finger prims exist ----
-        panda_prim = stage.GetPrimAtPath(self.PANDA_PRIM_PATH)
-        if panda_prim.IsValid():
-            children = [c.GetName() for c in panda_prim.GetChildren()]
-            print(f"[Scenario4] Panda children: {children}")
-        else:
-            print(f"[Scenario4] WARNING: Panda prim not found at {self.PANDA_PRIM_PATH}")
-
-        left_finger = stage.GetPrimAtPath(self.LEFT_FINGER_PATH)
-        right_finger = stage.GetPrimAtPath(self.RIGHT_FINGER_PATH)
-        print(f"[Scenario4] Left finger valid: {left_finger.IsValid()} at {self.LEFT_FINGER_PATH}")
-        print(f"[Scenario4] Right finger valid: {right_finger.IsValid()} at {self.RIGHT_FINGER_PATH}")
-
-        if left_finger.IsValid():
-            lf_children = [c.GetName() for c in left_finger.GetChildren()]
-            print(f"[Scenario4] Left finger children: {lf_children}")
-        if right_finger.IsValid():
-            rf_children = [c.GetName() for c in right_finger.GetChildren()]
-            print(f"[Scenario4] Right finger children: {rf_children}")
-
-        # ---- 1. Load Tashan TS-F-A sensors as children of finger prims ----
-        # By parenting under the finger, the sensor inherits the finger's
-        # world transform.  The local xform offsets to the fingertip and
-        # rotates the pad to face inward.
-        #
-        # Sensor default: pads face +Z (upward in standalone scenarios).
-        # Franka finger local frame: Z = along finger, Y = open/close axis.
-        # Left finger is on +Y side; pad must face -Y (inward).
-        #   Rx(+90°) maps +Z → -Y  ✓
-        # Right finger is on -Y side; pad must face +Y (inward).
-        #   Rx(-90°) maps +Z → +Y  ✓
-
-        prim_left = add_reference_to_stage(usd_path=ts_usd, prim_path=self.LEFT_SENSOR_PATH)
-        xform_l = UsdGeom.Xformable(prim_left)
-        xform_l.ClearXformOpOrder()
-        xform_l.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0.04))
-        xform_l.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(90, 0, 0))
-
-        prim_right = add_reference_to_stage(usd_path=ts_usd, prim_path=self.RIGHT_SENSOR_PATH)
-        xform_r = UsdGeom.Xformable(prim_right)
-        xform_r.ClearXformOpOrder()
-        xform_r.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0.04))
-        xform_r.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(-90, 0, 0))
-
-        print(f"[Scenario4] Loaded Tashan sensors from {ts_usd}")
-        print(f"[Scenario4]   Left sensor at {self.LEFT_SENSOR_PATH}")
-        print(f"[Scenario4]   Right sensor at {self.RIGHT_SENSOR_PATH}")
-
-        # ---- 2. Disable the sensor's own articulation ----
-        # The TS-F-A USD has a root_joint articulation that conflicts
-        # with the Panda articulation.  Deactivate it.
-        for sensor_path in [self.LEFT_SENSOR_PATH, self.RIGHT_SENSOR_PATH]:
-            sensor_prim = stage.GetPrimAtPath(sensor_path)
-            # Remove ArticulationRootAPI if present on the sensor root
-            if sensor_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
-                sensor_prim.RemoveAPI(UsdPhysics.ArticulationRootAPI)
-                print(f"[Scenario4] Removed ArticulationRootAPI from {sensor_path}")
-
-            # Deactivate the root_joint so it doesn't create a nested articulation
-            joint_path = f"{sensor_path}/root_joint"
-            joint_prim = stage.GetPrimAtPath(joint_path)
-            if joint_prim.IsValid():
-                joint_prim.SetActive(False)
-                print(f"[Scenario4] Deactivated {joint_path}")
-
-            # Also check if ArticulationRootAPI is on the root_joint prim
-            if joint_prim.IsValid() and joint_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
-                joint_prim.RemoveAPI(UsdPhysics.ArticulationRootAPI)
-                print(f"[Scenario4] Removed ArticulationRootAPI from {joint_path}")
-
-        # ---- 3. Create transparent cube ----
+        # ---- 1. Create transparent cube ----
         cube_size = 0.04  # 4 cm
         self.cube = DynamicCuboid(
             prim_path=self.CUBE_PRIM_PATH,
@@ -478,7 +448,7 @@ class ExampleScenario(ScenarioTemplate):
         )
         self._make_prim_transparent(self.CUBE_PRIM_PATH, opacity=0.35)
 
-        # ---- 4. Set up tactile sensor interfaces ----
+        # ---- 2. Set up tactile sensor interfaces ----
         cube_filter = [self.CUBE_PRIM_PATH]
 
         self.range_left = f"{self.LEFT_SENSOR_PATH}/pad_4/LightBeam_Sensor"
