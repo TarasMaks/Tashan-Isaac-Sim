@@ -49,25 +49,21 @@ class ScenarioTemplate:
 """
 Scenario 4: Panda robot pick-and-place with dual Tashan TS-F-A tactile sensors.
 
-Two TS-F-A sensors replace the default finger pads on the Panda gripper.
-Each sensor is parented directly under its respective finger prim
-(panda_leftfinger / panda_rightfinger) so that it inherits the finger's
-world transform automatically — no FixedJoints needed.  The sensor's own
-ArticulationRootAPI and root_joint are disabled to avoid conflicting with
-the Panda articulation.
+Two TS-F-A sensors are placed at WORLD level (/World/TipLeft, /World/TipRight)
+and attached to the Panda fingers via FixedJoints that target each sensor's
+base_link (a real rigid body).  This avoids nested-rigid-body errors that
+occur when sensors are parented under finger prims.
 
-A transparent cube is placed on the table for the robot to grasp.
-All 11 channels from both sensors are logged per physics step and
-plotted to PNG files on STOP.
+The sensors keep their full internal physics (base_link → tip_link → pad →
+pad_1..pad_7 connected by joints).  Only the root_joint and
+ArticulationRootAPI are removed so they don't conflict with the Panda
+articulation.
 
 Asset loading is split into two phases:
-  Phase 1 (load_robot)         — called from setup_scene_fn BEFORE
-      World.reset.  Loads the Franka USD, both sensor USDs (parented
-      under finger prims), and disables the sensors' articulations.
-      This ensures the physics system processes ALL rigid bodies
-      (including sensor pads) in its init pass.
-  Phase 2 (_build_sensor_scene) — called from setup_post_load_fn AFTER
-      World.reset.  Creates the cube and the RigidPrim contact wrappers.
+  Phase 1 (load_robot) — BEFORE World.reset.  Loads robot + sensors,
+      removes sensor articulation roots, creates FixedJoints.
+  Phase 2 (_build_sensor_scene) — AFTER World.reset.  Creates the
+      cube and RigidPrim contact wrappers.
 """
 
 
@@ -100,14 +96,16 @@ class ExampleScenario(ScenarioTemplate):
         "Capacitance Ch7",
     ]
 
-    # Prim paths — sensors are parented under their respective finger prims
-    # so they automatically inherit the finger's world transform.
+    # Prim paths — sensors at WORLD level (avoids nested-rigid-body issues).
     PANDA_PRIM_PATH = "/World/Panda"
     LEFT_FINGER_PATH = "/World/Panda/panda_leftfinger"
     RIGHT_FINGER_PATH = "/World/Panda/panda_rightfinger"
-    LEFT_SENSOR_PATH = "/World/Panda/panda_leftfinger/TipLeft"
-    RIGHT_SENSOR_PATH = "/World/Panda/panda_rightfinger/TipRight"
+    LEFT_SENSOR_PATH = "/World/TipLeft"
+    RIGHT_SENSOR_PATH = "/World/TipRight"
     CUBE_PRIM_PATH = "/World/TransparentCube"
+
+    # Quaternion helpers  (w, x, y, z)  — Gf.Quatf(real, Gf.Vec3f(imag))
+    _SQRT2_2 = 0.7071068
 
     def __init__(self):
         self._articulation = None
@@ -131,11 +129,10 @@ class ExampleScenario(ScenarioTemplate):
     def load_robot(self):
         """Phase 1: called from setup_scene_fn BEFORE World.reset.
 
-        Loads the Franka robot USD, the two Tashan sensor USDs (parented
-        under each finger prim), disables the sensors' own articulations,
-        and creates the Articulation wrapper.  Everything is on the USD
-        stage before World.reset so the physics tensor system discovers
-        all rigid bodies (including sensor pads) in one pass."""
+        Loads the Franka robot, both Tashan sensors at world level,
+        removes the sensors' articulation roots, and creates FixedJoints
+        between each finger and the sensor's base_link (a real rigid body).
+        """
         stage = get_current_stage()
         ts_usd = os.path.join(os.path.dirname(__file__), "../assets/TS-F-A.usd")
 
@@ -144,29 +141,17 @@ class ExampleScenario(ScenarioTemplate):
         print(f"[Scenario4] Loading Panda from {panda_usd}")
         add_reference_to_stage(usd_path=panda_usd, prim_path=self.PANDA_PRIM_PATH)
 
-        # ---- 2. Load sensors as children of finger prims ----
-        # Sensor default: pads face +Z (upward in standalone scenarios).
-        # User confirmed Rx(+90°)/Rx(-90°) made pads face OUTWARD.
-        # Invert: Rx(-90°) for left, Rx(+90°) for right.
-        prim_left = add_reference_to_stage(usd_path=ts_usd, prim_path=self.LEFT_SENSOR_PATH)
-        xform_l = UsdGeom.Xformable(prim_left)
-        xform_l.ClearXformOpOrder()
-        xform_l.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0.04))
-        xform_l.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(-90, 0, 0))
-
-        prim_right = add_reference_to_stage(usd_path=ts_usd, prim_path=self.RIGHT_SENSOR_PATH)
-        xform_r = UsdGeom.Xformable(prim_right)
-        xform_r.ClearXformOpOrder()
-        xform_r.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(0, 0, 0.04))
-        xform_r.AddRotateXYZOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(90, 0, 0))
-
+        # ---- 2. Load sensors at WORLD level (no parenting) ----
+        # No initial transform — the FixedJoint will snap them to the
+        # correct position and orientation on the first physics step.
+        add_reference_to_stage(usd_path=ts_usd, prim_path=self.LEFT_SENSOR_PATH)
+        add_reference_to_stage(usd_path=ts_usd, prim_path=self.RIGHT_SENSOR_PATH)
         print(f"[Scenario4] Loaded Tashan sensors from {ts_usd}")
-        print(f"[Scenario4]   Left sensor at {self.LEFT_SENSOR_PATH}")
-        print(f"[Scenario4]   Right sensor at {self.RIGHT_SENSOR_PATH}")
 
-        # ---- 3. Disable the sensors' own articulations ----
-        # The TS-F-A USD has a root_joint that would create a nested
-        # articulation inside the Panda's tree.
+        # ---- 3. Disable the sensors' own articulation ----
+        # Remove ArticulationRootAPI so the sensor is not its own
+        # articulation (which would prevent cross-articulation joints).
+        # Deactivate root_joint (sensor no longer fixed to the world).
         for sensor_path in [self.LEFT_SENSOR_PATH, self.RIGHT_SENSOR_PATH]:
             sensor_prim = stage.GetPrimAtPath(sensor_path)
             if sensor_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
@@ -182,13 +167,50 @@ class ExampleScenario(ScenarioTemplate):
                 joint_prim.SetActive(False)
                 print(f"[Scenario4] Deactivated {joint_path}")
 
-        # ---- 4. Create Articulation wrapper ----
+        # ---- 4. FixedJoints: finger ↔ sensor base_link ----
+        # base_link is a real rigid body inside the sensor USD, so the
+        # FixedJoint has valid body targets on both sides.
+        #
+        # localPos0 = fingertip offset in the finger's local frame.
+        # localRot0 = rotation applied at the attachment point on the finger.
+        #   The sensor pads face +Z in the sensor's default frame.
+        #   To make the left-finger pads face inward (toward the right finger)
+        #   we rotate the joint frame so the sensor's +Z maps to the
+        #   finger's inward direction.
+        #
+        #   Rx(+90°) maps +Z → −Y.   Rx(−90°) maps +Z → +Y.
+        #
+        #   The Franka left finger is on the +Y side, so inward = −Y → Rx(+90°).
+        #   The Franka right finger is on the −Y side, so inward = +Y → Rx(−90°).
+        #
+        # We try BOTH +90 and −90 — if user reports outward, swap them.
+        sq = self._SQRT2_2
+        rot_left  = Gf.Quatf(sq, Gf.Vec3f(sq, 0, 0))   # Rx(+90°)
+        rot_right = Gf.Quatf(sq, Gf.Vec3f(-sq, 0, 0))   # Rx(−90°)
+
+        self._create_fixed_joint(
+            stage,
+            joint_path="/World/FixedJointLeft",
+            body0_path=self.LEFT_FINGER_PATH,
+            body1_path=f"{self.LEFT_SENSOR_PATH}/base_link",
+            local_pos0=Gf.Vec3f(0, 0, 0.04),
+            local_rot0=rot_left,
+        )
+        self._create_fixed_joint(
+            stage,
+            joint_path="/World/FixedJointRight",
+            body0_path=self.RIGHT_FINGER_PATH,
+            body1_path=f"{self.RIGHT_SENSOR_PATH}/base_link",
+            local_pos0=Gf.Vec3f(0, 0, 0.04),
+            local_rot0=rot_right,
+        )
+        print("[Scenario4] FixedJoints created (finger ↔ sensor base_link)")
+
+        # ---- 5. Create Articulation wrapper ----
         self._panda_robot = Articulation(prim_paths_expr=self.PANDA_PRIM_PATH, name="panda_robot")
 
     def setup_scenario(self, articulation, object_prim):
-        """Phase 2: called from setup_post_load_fn AFTER World.reset.
-        Panda child prims now exist — load local sensor USDs, create
-        FixedJoints, cube, and tactile RigidPrim wrappers."""
+        """Phase 2: called from setup_post_load_fn AFTER World.reset."""
         self._build_sensor_scene()
         self._articulation = self._panda_robot
         self._running_scenario = True
@@ -427,6 +449,25 @@ class ExampleScenario(ScenarioTemplate):
 
         # Grasp phase indicator
         rr.log("grasp/phase", rr.Scalar(self._phase))
+
+    # ------------------------------------------------------------------
+    # FixedJoint helper
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _create_fixed_joint(stage, joint_path, body0_path, body1_path,
+                            local_pos0=Gf.Vec3f(0), local_pos1=Gf.Vec3f(0),
+                            local_rot0=None, local_rot1=None):
+        """Create a USD FixedJoint between two rigid bodies."""
+        joint = UsdPhysics.FixedJoint.Define(stage, joint_path)
+        joint.CreateBody0Rel().SetTargets([Sdf.Path(body0_path)])
+        joint.CreateBody1Rel().SetTargets([Sdf.Path(body1_path)])
+        joint.CreateLocalPos0Attr().Set(local_pos0)
+        joint.CreateLocalPos1Attr().Set(local_pos1)
+        if local_rot0 is not None:
+            joint.CreateLocalRot0Attr().Set(local_rot0)
+        if local_rot1 is not None:
+            joint.CreateLocalRot1Attr().Set(local_rot1)
+        return joint
 
     # ------------------------------------------------------------------
     # Scene assembly (phase 2 — after World.reset)
